@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Онлайн Мафия с Настройкой Ролей</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #2d2d34; color: #fff; text-align: center; padding: 20px; }
+        .container { max-width: 550px; margin: 0 auto; background: #2a2a35; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        input, button, select { width: 100%; padding: 12px; margin: 10px 0; box-sizing: border-box; border-radius: 6px; border: none; font-size: 16px; }
+        input, select { background: #3b3b4a; color: #fff; }
+        button { background: #79181d; color: #fff; font-weight: bold; cursor: pointer; }
+        button:hover { background: #7a1b20; }
+        .hidden { display: none; }
+        ul { list-style: none; padding: 0; text-align: left; }
+        li { padding: 10px; background: #3b3b4a; margin-bottom: 5px; border-radius: 4px; display: flex; justify-content: space-between; }
+        
+        /* Панель выбора ролей для ведущего */
+        .role-selector { display: flex; justify-content: space-between; align-items: center; background: #3b3b4a; padding: 8px 15px; margin: 5px 0; border-radius: 6px; }
+        .role-selector input { width: 60px; margin: 0; padding: 5px; text-align: center; }
+
+        /* НАСТОЯЩЕЕ ДИНАМИЧЕСКОЕ КОЛЕСО НА CANVAS */
+        .wheel-box { position: relative; width: 320px; height: 320px; margin: 25px auto; }
+        canvas { border-radius: 50%; box-shadow: 0 0 20px rgba(0,0,0,0.6); transition: transform 7s cubic-bezier(0.1, 0.8, 0.1, 1); }
+        /* Стрелка указателя сверху */
+        .arrow { position: absolute; top: -15px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 15px solid transparent; border-right: 15px solid transparent; border-top: 25px solid #ffc107; z-index: 10; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- ЭКРАН ВХОДА ИГРОКА -->
+        <div id="screen-auth">
+            <h2>Вход в игру</h2>
+            <input type="text" id="player-name" placeholder="Введите ваше имя" required>
+            <button onclick="joinAsPlayer()">Войти в комнату</button>
+            <button onclick="switchToLeader()" style="background: #3b3b4a; margin-top: 20px;">Я ВЕДУЩИЙ 🕶️</button>
+        </div>
+
+        <!-- ЭКРАН ОЖИДАНИЯ ИГРОКА -->
+        <div id="screen-player-lobby" class="hidden">
+            <h2>Вы в комнате ожидания!</h2>
+            <p>Привет, <span id="lobby-name" style="color: #811f24;"></span>! Ведущий собирает игроков...</p>
+            <h3>Игроки в сети:</h3>
+            <ul id="player-list-client"></ul>
+        </div>
+
+        <!-- ЭКРАН КРУЧЕНИЯ КОЛЕСА (ДЛЯ ИГРОКА) -->
+        <div id="screen-wheel" class="hidden">
+            <h2>Твоя роль готова!</h2>
+            <div class="wheel-box">
+                <div class="arrow"></div>
+                <canvas id="wheelCanvas" width="320" height="320"></canvas>
+            </div>
+            <button id="spin-btn" onclick="spinWheel()">Крутить колесо ролей</button>
+            <h1 id="role-display" class="hidden" style="color: #ffc107; margin-top: 20px; font-size: 32px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);"></h1>
+        </div>
+
+        <!-- ЭКРАН ВЕДУЩЕГО -->
+         <div id="screen-leader" class="hidden">
+            <h2>Панель Ведущего 🕶️</h2>
+            
+            <div style="background: #22222b; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                <h3>Настройка карт в игре:</h3>
+                <div class="role-selector"><span>🕵️‍♂️ Мафия</span><input type="number" id="cnt-mafia" value="2" min="0"></div>
+                <div class="role-selector"><span>🤠 Шериф</span><input type="number" id="cnt-sheriff" value="1" min="0"></div>
+                <div class="role-selector"><span>🩺 Доктор</span><input type="number" id="cnt-doctor" value="1" min="0"></div>
+                <div class="role-selector"><span>⚖️ Адвокат</span><input type="number" id="cnt-lawyer" value="0" min="0"></div>
+                <div class="role-selector"><span>👨‍🌾 Мирный житель</span><input type="number" id="cnt-civilian" value="3" min="0"></div>
+            </div>
+
+            <!-- ЗДЕСЬ ТЕПЕРЬ СТРОГО ДВЕ КНОПКИ ПОДРЯД -->
+            <button id="distribute-btn" onclick="distributeRoles()">Раздать выбранные роли</button>
+            <button id="reset-btn" onclick="resetGame()" style="background: #555; margin-top: 5px;">Новая игра (Сброс) 🔄</button>
+            
+            <h3>Список игроков и роли:</h3>
+            <ul id="player-list-leader"></ul>
+        </div>
+    </div>
+
+    <script>
+        const wsUrl = `ws://${window.location.host}/ws`;
+        let ws;
+        let myRole = "";
+        let allGameRoles = []; 
+        let isLeader = false;
+
+        function initWebSocket(roleType, name = "") {
+            if (ws) {
+                ws.close();
+            }
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                if (roleType === "leader") {
+                    ws.send(JSON.stringify({ action: "init_leader" }));
+                } else {
+                    ws.send(JSON.stringify({ action: "join_player", name: name }));
+                }
+            };
+
+             ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                console.log("Получено сообщение от сервера:", msg);
+
+                if (msg.type === "update_players") {
+                    updatePlayersUI(msg.players);
+                }
+
+                if (msg.type === "your_role") {
+                    myRole = msg.role;
+                    allGameRoles = (msg.all_roles && msg.all_roles.length > 0) ? msg.all_roles : ["Мафия", "Шериф", "Доктор", "Адвокат", "Мирный"]; 
+                    showWheelScreen();
+                }
+
+                // ДОБАВЬ ВОТ ЭТОТ БЛОК НИЖЕ:
+                if (msg.type === "game_reseted") {
+                    myRole = "";
+                    // Прячем экран колеса и возвращаем экран лобби ожидания
+                    document.getElementById('screen-wheel').classList.add('hidden');
+                    document.getElementById('screen-player-lobby').classList.remove('hidden');
+                    
+                    // Возвращаем кнопку кручения колеса в исходное рабочее состояние для новой игры
+                    const spinBtn = document.getElementById('spin-btn');
+                    spinBtn.disabled = false;
+                    spinBtn.style.display = 'block';
+                    document.getElementById('role-display').classList.add('hidden');
+                    document.getElementById('wheelCanvas').style.transform = 'rotate(0deg)';
+                }
+            };
+        }
+
+        function joinAsPlayer() {
+            const name = document.getElementById('player-name').value.trim();
+            if (!name) return alert("Введите имя!");
+            document.getElementById('screen-auth').classList.add('hidden');
+            document.getElementById('screen-player-lobby').classList.remove('hidden');
+            document.getElementById('lobby-name').innerText = name;
+            initWebSocket("player", name);
+        }
+
+        function switchToLeader() {
+            isLeader = true;
+            document.getElementById('screen-auth').classList.add('hidden');
+            document.getElementById('screen-leader').classList.remove('hidden');
+            
+            // ЖЕСТКАЯ ЗАЩИТА: Если сокет от роли игрока был открыт на этой вкладке, закрываем его
+            if (ws) {
+                ws.close();
+            }
+            
+            initWebSocket("leader");
+        }
+
+        function updatePlayersUI(players) {
+            if (isLeader) {
+                const list = document.getElementById('player-list-leader');
+                list.innerHTML = "";
+                players.forEach(p => {
+                    list.innerHTML += `<li><span>${p.name}</span> <b style="color: #ffc107;">${p.role ? p.role : 'Ожидает'}</b></li>`;
+                });
+            } else {
+                const list = document.getElementById('player-list-client');
+                list.innerHTML = "";
+                players.forEach(name => {
+                    list.innerHTML += `<li>${name}</li>`;
+                });
+            }
+        }
+
+        function distributeRoles() {
+            // Блокируем кнопку РАЗДАЧИ (distribute-btn)
+            const distBtn = document.getElementById('distribute-btn');
+            distBtn.disabled = true;
+            distBtn.style.background = '#555';
+            distBtn.innerText = 'Роли раздаются...';
+
+            const roles = [];
+            const addRoles = (id, roleName) => {
+                const count = parseInt(document.getElementById(id).value) || 0;
+                for (let i = 0; i < count; i++) {
+                    roles.push(roleName);
+                }
+            };
+
+            addRoles('cnt-mafia', 'Мафия');
+            addRoles('cnt-sheriff', 'Шериф');
+            addRoles('cnt-doctor', 'Доктор');
+            addRoles('cnt-lawyer', 'Адвокат');
+            addRoles('cnt-civilian', 'Мирный');
+
+            ws.send(JSON.stringify({
+                action: "start_distribution",
+                roles: roles
+            }));}
+
+        function resetGame() {
+    console.log("Кнопка Новая игра успешно вызвана!");
+
+    // Возвращаем кнопку раздачи в активное состояние
+    const distBtn = document.getElementById('distribute-btn');
+    if (distBtn) {
+        distBtn.disabled = false;
+        distBtn.style.background = '#e50914';
+        distBtn.innerText = 'Раздать выбранные роли';
+    }
+
+    // Отправляем команду сброса на сервер
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: "reset_game" }));
+    } else {
+        console.error("WebSocket закрыт, переподключаем ведущего...");
+        initWebSocket("leader");
+    }
+        
+
+            addRoles('cnt-mafia', 'Мафия');
+            addRoles('cnt-sheriff', 'Шериф');
+            addRoles('cnt-doctor', 'Доктор');
+            addRoles('cnt-lawyer', 'Адвокат');
+            addRoles('cnt-civilian', 'Мирный');
+
+            ws.send(JSON.stringify({
+                action: "start_distribution",
+                roles: roles
+            }));
+        }
+        
+        function showWheelScreen() {
+            document.getElementById('screen-player-lobby').classList.add('hidden');
+            document.getElementById('screen-wheel').classList.remove('hidden');
+            drawWheel(); 
+        }
+
+        function getRoleColor(roleName) {
+            switch(roleName) {
+                case 'Мафия': return '#1a1a1a';    // Чёрный
+                case 'Мирный': return '#79181d';   // Красный
+                case 'Шериф': return '#964B00';    // 
+                case 'Доктор': return '#4caf50';   // Зелёный
+                case 'Адвокат': return '#9c27b0';  // Фиолетовый
+                default: return '#3b3b4a';         // Серый дефолтный
+            }
+        }
+
+        function drawWheel() {
+            const canvas = document.getElementById('wheelCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Если массив пуст, берем дефолтный набор для отрисовки
+            if (!allGameRoles || allGameRoles.length === 0) {
+                allGameRoles = ["Мафия", "Шериф", "Доктор", "Адвокат", "Мирный"];
+            }
+            
+            const numSectors = allGameRoles.length;
+            const arcSize = (2 * Math.PI) / numSectors; 
+            const radius = canvas.width / 2;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let i = 0; i < numSectors; i++) {
+                const angle = i * arcSize;
+                
+                // КРАСИМ СЕКТОР В ЗАВИСИМОСТИ ОТ РОЛИ
+                ctx.fillStyle = getRoleColor(allGameRoles[i]);
+                
+                ctx.beginPath();
+                ctx.moveTo(radius, radius);
+                ctx.arc(radius, radius, radius, angle, angle + arcSize);
+                ctx.lineTo(radius, radius);
+                ctx.fill();
+
+                ctx.save();
+                ctx.translate(radius, radius);
+                ctx.rotate(angle + arcSize / 2);
+                ctx.textAlign = "right";
+                ctx.fillStyle = "#fff";
+                ctx.font = "bold 14px Arial";
+                ctx.fillText(allGameRoles[i], radius - 15, 5);
+                ctx.restore();
+            }
+        }
+
+        function spinWheel() {
+            const canvas = document.getElementById('wheelCanvas');
+            const btn = document.getElementById('spin-btn');
+            
+            if (btn.disabled) return;
+            btn.disabled = true;
+
+            // Жестко гарантируем наличие массива ролей для расчета анимации
+            if (!allGameRoles || allGameRoles.length === 0) {
+                allGameRoles = ["Мафия", "Шериф", "Доктор", "Адвокат", "Мирный"];
+            }
+
+            const numSectors = allGameRoles.length;
+            const arcSize = 360 / numSectors;
+
+            // Ищем индекс роли игрока
+            const targetIndex = allGameRoles.indexOf(myRole);
+            const safeIndex = targetIndex !== -1 ? targetIndex : 0;
+            
+            
+            const randomOffsetInSector = Math.floor(Math.random() * (arcSize - 10)) + 5;
+            
+            
+            const targetAngle = 270 - (safeIndex * arcSize) - randomOffsetInSector;
+            const finalRotation = 1800 + targetAngle;
+
+            canvas.style.transform = `rotate(${finalRotation}deg)`;
+
+            setTimeout(() => {
+                const display = document.getElementById('role-display');
+                display.innerText = `Твоя роль: ${myRole.toUpperCase()}!`;
+                display.classList.remove('hidden');
+                btn.style.display = 'none';
+            }, 7000);
+        }
+    </script>
+</body>
+</html>
